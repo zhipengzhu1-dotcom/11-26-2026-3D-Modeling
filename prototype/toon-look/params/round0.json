@@ -1,0 +1,32 @@
+{
+ "note": "Round 0 baseline: plain MMD Tools import (its own MMD shader), factory AgX view transform, neutral grey world and one sun. Only the known overlay fix is applied (颜2, 照れ and the other alpha-textured layers set to Blended), since without it the face shows the dark patch.",
+ "shading": "mmd",
+ "view_transform": "AgX",
+ "exposure": 0.0,
+ "world_light": [
+  0.8,
+  0.8,
+  0.8
+ ],
+ "world_strength": 1.0,
+ "backdrop": [
+  0.8,
+  0.8,
+  0.8
+ ],
+ "sun": {
+  "energy": 2.5,
+  "rot": [
+   55,
+   0,
+   -25
+  ],
+  "color": [
+   1,
+   1,
+   1
+  ],
+  "angle": 1,
+  "shadow": true
+ }
+}

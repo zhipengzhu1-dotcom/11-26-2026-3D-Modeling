@@ -1,0 +1,110 @@
+{
+ "note": "Round 4: pull the clipped whites back to the reference's lavender-white, deepen the skin and hair shadows, and lift the eyes toward pale periwinkle.",
+ "change": "Cloth gain x0.80 (dress whites no longer clip); skin gain x(0.97, 0.93, 0.93) and darker pink skin shadow; hair gain to x(1.25, 1.25, 1.35) with a darker blue hair shadow; iris gain to x(1.60, 1.50, 1.15).",
+ "shading": "toon",
+ "view_transform": "Standard",
+ "exposure": 0.35,
+ "world_light": [
+  1,
+  1,
+  1
+ ],
+ "world_strength": 0.6,
+ "backdrop": [
+  0.875,
+  0.839,
+  0.776
+ ],
+ "sun": {
+  "energy": 3.0,
+  "rot": [
+   50,
+   0,
+   -30
+  ],
+  "color": [
+   1,
+   1,
+   1
+  ],
+  "angle": 3,
+  "shadow": false
+ },
+ "toon": {
+  "ramp_pos": 0.5,
+  "ramp_width": 0.05,
+  "shadow": {
+   "skin": [
+    0.8,
+    0.62,
+    0.66
+   ],
+   "hair": [
+    0.52,
+    0.56,
+    0.8
+   ],
+   "cloth": [
+    0.8,
+    0.73,
+    0.88
+   ]
+  },
+  "gain": {
+   "hair": [
+    1.25,
+    1.25,
+    1.35
+   ],
+   "iris": [
+    1.6,
+    1.5,
+    1.15
+   ],
+   "skin": [
+    0.97,
+    0.93,
+    0.93
+   ],
+   "cloth": [
+    0.8,
+    0.8,
+    0.8
+   ]
+  },
+  "rim": {
+   "strength": 0.3,
+   "width": 0.3,
+   "lo": 0.78,
+   "hi": 0.95,
+   "color": [
+    0.8,
+    0.95,
+    1.0
+   ]
+  },
+  "sphere": 1.0,
+  "emblem": 3.0,
+  "lit": [
+   0.99,
+   0.96,
+   1.0
+  ]
+ },
+ "outline": {
+  "thickness": 0.0012,
+  "darken": 0.45,
+  "saturate": 1.2
+ },
+ "bloom": {
+  "threshold": 0.9,
+  "smooth": 0.5,
+  "strength": 0.4,
+  "size": 0.7
+ },
+ "gamma": 1.1,
+ "huesat": {
+  "sat": 1.12,
+  "value": 1.0
+ }
+}

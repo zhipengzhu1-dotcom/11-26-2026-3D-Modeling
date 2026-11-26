@@ -1,0 +1,84 @@
+{
+ "note": "Round 2: brighten into the reference's high-key, slightly over-exposed look (its skin and dress whites are close to clipping, its hair and eyes far brighter than the textures under neutral light), and fix two artefacts seen in round 1.",
+ "change": "Exposure +0.35 and view gamma 1.1 (lift mids); compositor saturation 1.12; sphere (matcap) strength 0.6 to 1.0, as MMD Tools adds it; rim narrowed to the silhouette (ramp 0.78 to 0.95) to remove white blotches on shoulders; pinker lavender cloth shadow and pinker skin shadow.",
+ "shading": "toon",
+ "view_transform": "Standard",
+ "exposure": 0.35,
+ "world_light": [
+  1,
+  1,
+  1
+ ],
+ "world_strength": 0.6,
+ "backdrop": [
+  0.875,
+  0.839,
+  0.776
+ ],
+ "sun": {
+  "energy": 3.0,
+  "rot": [
+   50,
+   0,
+   -30
+  ],
+  "color": [
+   1,
+   1,
+   1
+  ],
+  "angle": 3,
+  "shadow": false
+ },
+ "toon": {
+  "ramp_pos": 0.5,
+  "ramp_width": 0.05,
+  "shadow": {
+   "skin": [
+    0.93,
+    0.78,
+    0.8
+   ],
+   "hair": [
+    0.75,
+    0.78,
+    0.92
+   ],
+   "cloth": [
+    0.86,
+    0.8,
+    0.92
+   ]
+  },
+  "gain": {},
+  "rim": {
+   "strength": 0.3,
+   "width": 0.3,
+   "lo": 0.78,
+   "hi": 0.95,
+   "color": [
+    0.8,
+    0.95,
+    1.0
+   ]
+  },
+  "sphere": 1.0,
+  "emblem": 3.0
+ },
+ "outline": {
+  "thickness": 0.0012,
+  "darken": 0.45,
+  "saturate": 1.2
+ },
+ "bloom": {
+  "threshold": 0.9,
+  "smooth": 0.5,
+  "strength": 0.4,
+  "size": 0.7
+ },
+ "gamma": 1.1,
+ "huesat": {
+  "sat": 1.12,
+  "value": 1.0
+ }
+}

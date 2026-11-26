@@ -1,0 +1,15 @@
+{
+ "note": "Round 1: the toon look from the research note. Hand-built Shader to RGB toon materials from her own textures (two-step ramp, pale tinted shadow), Standard view transform, bright white world fill, one soft key sun without cast shadows, thin texture-coloured outlines, a weak rim, compositor Bloom, and a flat warm backdrop of the measured reference background colour.",
+ "change": "Replaced the MMD Tools shader with toon materials; AgX to Standard; grey world to bright white fill; sun shadows off; warm backdrop #dfd6c6; thin outlines, weak rim, Bloom.",
+ "shading": "toon",
+ "view_transform": "Standard",
+ "exposure": 0.0,
+ "world_light": [1, 1, 1], "world_strength": 0.6,
+ "backdrop": [0.875, 0.839, 0.776],
+ "sun": {"energy": 3.0, "rot": [50, 0, -30], "color": [1, 1, 1], "angle": 3, "shadow": false},
+ "toon": {"ramp_pos": 0.5, "ramp_width": 0.05,
+          "shadow": {"skin": [0.95, 0.82, 0.82], "hair": [0.75, 0.78, 0.92], "cloth": [0.82, 0.82, 0.92]},
+          "gain": {}, "rim": {"strength": 0.3, "width": 0.3, "color": [0.8, 0.95, 1.0]}, "sphere": 0.6, "emblem": 3.0},
+ "outline": {"thickness": 0.0012, "darken": 0.45, "saturate": 1.2},
+ "bloom": {"threshold": 0.9, "smooth": 0.5, "strength": 0.4, "size": 0.7}
+}
