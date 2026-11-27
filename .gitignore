@@ -1,0 +1,25 @@
+# Model assets and anything derived from them never enter git (docs/adr/0002).
+*.zip
+*.rar
+*.7z
+*.pmx
+*.pmd
+*.vmd
+*.vpd
+*.fbx
+*.blend
+*.blend1
+*.glb
+*.gltf
+*.usd*
+*.obj
+*.stl
+/assets/
+/build/
+/renders/
+/沃雅妮莎_by_*/
+.DS_Store
+/.claude/worktrees/
+/FaSHioN motion/
+/review/
+/* motion/
