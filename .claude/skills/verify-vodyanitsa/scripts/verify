@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""verify-vodyanitsa: run one Build, render the stage 1 clip, run the 穿模 scan, keep the evidence.
+
+Subcommands: doctor, build, clip, scan, report, cleanup, guard. Run `verify <cmd> -h` for options.
+Standard library only; the heavy work runs in headless Blender (scripts/blender/*.py).
+"""
+import argparse
+import glob
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BL = os.path.join(HERE, "blender")
+CREDITS = [
+    "Model: 【原神】沃雅妮莎 (Vodyanitsa) by miHoYo, converted by 观海",
+    "Motion: 時よ止まれ by Kei (@Kei_MMD_)",
+    "Choreography traced from @ellendance",
+    "Song: ILLIT '時よ止まれ (Toki Yo Tomare)' (the clip has no audio)",
+]
+DERIVED_EXT = {".pmx", ".pmd", ".vmd", ".vpd", ".blend", ".blend1", ".fbx", ".glb", ".gltf", ".obj", ".stl", ".abc",
+               ".usd", ".usda", ".usdc", ".usdz", ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".dds", ".spa", ".sph",
+               ".exr", ".tif", ".tiff", ".webp", ".gif", ".mp4", ".mov", ".mkv", ".webm", ".avi", ".npy", ".npz"}
+DERIVED_DIRS = ("review/", "build/", "renders/", "assets/", "沃雅妮莎_by_")
+DERIVED_NAMES = {"numbers.json", "build.json", "clip.json"}
+
+
+def die(msg, code=1):
+    print(f"VERIFY-ERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def git(*args, check=True):
+    r = subprocess.run(["git", "-C", ROOT, *args], capture_output=True, text=True)
+    if check and r.returncode not in (0, 1):
+        die(f"git {' '.join(args)} failed: {r.stderr.strip()}")
+    return r
+
+
+def repo_root():
+    r = subprocess.run(["git", "-C", HERE, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if r.returncode != 0:
+        die("this skill must live inside the project's git checkout")
+    return r.stdout.strip()
+
+
+ROOT = repo_root()
+
+
+def rp(p):
+    return p if os.path.isabs(p) else os.path.join(ROOT, p)
+
+
+def cfg():
+    model = os.environ.get("VODYANITSA_MODEL")
+    if not model:
+        hits = sorted(glob.glob(os.path.join(ROOT, "沃雅妮莎_by_*", "沃雅妮莎.pmx")))
+        model = hits[0] if hits else os.path.join(ROOT, "沃雅妮莎_by_原神_<download id>", "沃雅妮莎.pmx")
+    return {
+        "model": rp(model),
+        "motion": rp(os.environ.get("VODYANITSA_MOTION", "assets/motion/toki-yo-tomare/時よ止まれ.vmd")),
+        "blender": os.environ.get("BLENDER", "/Applications/Blender.app/Contents/MacOS/Blender"),
+        "ffmpeg": os.environ.get("FFMPEG") or shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg",
+        "ffprobe": os.environ.get("FFPROBE") or shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe",
+        "review": rp(os.environ.get("VODYANITSA_REVIEW_DIR", "review/verify")),
+        "scratch": rp(os.environ.get("VODYANITSA_SCRATCH_DIR", "build/verify")),
+    }
+
+
+# ---------------------------------------------------------------- guard
+def guard_reason(path):
+    """None if model-derived output may be written at `path`, else the reason it may not."""
+    ap = os.path.realpath(rp(path))
+    root = os.path.realpath(ROOT)
+    if os.path.commonpath([ap, root]) != root:
+        return None  # outside the checkout: git can never track it
+    rel = os.path.relpath(ap, root)
+    if rel == ".":
+        return "the repository root itself is tracked"
+    r = subprocess.run(["git", "-C", ROOT, "check-ignore", "-q", rel], capture_output=True)
+    if r.returncode == 0:
+        return None
+    return f"'{rel}' is not git-ignored, so git could track what is written there (docs/adr/0002)"
+
+
+def guard(path):
+    why = guard_reason(path)
+    if why:
+        die(f"GUARD REFUSED to write model-derived output: {why}", code=3)
+    return path
+
+
+def run_dirs(c, run_id, create=False):
+    if not run_id or "/" in run_id or run_id.startswith("."):
+        die(f"bad --run-id {run_id!r}")
+    s, r = os.path.join(c["scratch"], run_id), os.path.join(c["review"], run_id)
+    if create:
+        guard(s), guard(r)
+        os.makedirs(s, exist_ok=True)
+        os.makedirs(r, exist_ok=True)
+    return s, r
+
+
+# ---------------------------------------------------------------- blender runner
+def blender(c, scratch, step, script, *args):
+    """Run one headless Blender job we own. Its pid sits in <scratch>/blender.pid while it runs."""
+    os.makedirs(os.path.join(scratch, "logs"), exist_ok=True)
+    log = os.path.join(scratch, "logs", f"{step}.log")
+    cmd = [c["blender"], "-b", "--python-exit-code", "1", "--python", os.path.join(BL, script), "--", *args]
+    pidf = os.path.join(scratch, "blender.pid")
+    t0 = time.time()
+    with open(log, "w") as lf:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        with open(pidf, "w") as f:
+            f.write(f"{p.pid}\n")
+        try:
+            for line in p.stdout:
+                lf.write(line)
+                if line.startswith(("BUILD", "CLIP", "SCAN", "VERIFY-ERROR", "Traceback")) or "Error:" in line:
+                    print("  " + line.rstrip(), flush=True)
+            p.wait()
+        except KeyboardInterrupt:
+            p.terminate()
+            p.wait(10)
+            raise
+        finally:
+            if os.path.exists(pidf):
+                os.remove(pidf)
+    if p.returncode != 0:
+        die(f"Blender {step} failed (exit {p.returncode}); see {os.path.relpath(log, ROOT)}")
+    return time.time() - t0
+
+
+def load(path, what):
+    if not os.path.exists(path):
+        die(f"{what} missing: {os.path.relpath(path, ROOT)}")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------- doctor
+def leaks():
+    paths = git("ls-files", "-z").stdout.split("\0")
+    for line in git("status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0"):
+        if len(line) > 3:
+            paths.append(line[3:])
+    bad = []
+    for p in filter(None, set(paths)):
+        ext = os.path.splitext(p)[1].lower()
+        name = os.path.basename(p)
+        if ext in DERIVED_EXT or p.startswith(DERIVED_DIRS) or name in DERIVED_NAMES or name.startswith("moment_"):
+            bad.append(p)
+    return sorted(bad)
+
+
+def cmd_doctor(a):
+    c = cfg()
+    checks = []
+
+    def check(name, ok, detail):
+        checks.append((name, ok, detail))
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}: {detail}")
+
+    print(f"verify-vodyanitsa doctor (repo {os.path.basename(ROOT)})")
+    bl = os.path.exists(c["blender"])
+    ver = ""
+    if bl:
+        ver = subprocess.run([c["blender"], "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+    check("Blender", bl and ver.startswith("Blender 5."),
+          ver or f"not found at {c['blender']}; install Blender 5.2 LTS or set BLENDER")
+    if bl:
+        expr = ("import addon_utils,sys\n"
+                "m=[x.__name__ for x in addon_utils.modules() if x.__name__.endswith('mmd_tools')]\n"
+                "m and addon_utils.enable(m[0], default_set=False)\n"
+                "import bpy\nprint('MMDTOOLS', bool(m) and hasattr(bpy.ops.mmd_tools,'import_model'))")
+        r = subprocess.run([c["blender"], "-b", "--python-expr", expr], capture_output=True, text=True)
+        check("MMD Tools", "MMDTOOLS True" in r.stdout, "enabled in headless Blender" if "MMDTOOLS True" in r.stdout
+              else "missing: install the MMD Tools extension in Blender (Get Extensions, 'MMD Tools')")
+    for k in ("ffmpeg", "ffprobe"):
+        check(k, os.path.exists(c[k]), c[k] if os.path.exists(c[k]) else f"not found; install ffmpeg or set {k.upper()}")
+    check("model (local copy)", os.path.isfile(c["model"]),
+          os.path.relpath(c["model"], ROOT) if os.path.isfile(c["model"]) else
+          "MISSING. Download the 【原神】沃雅妮莎 (Vodyanitsa) MMD model (miHoYo, converted by 观海), unzip it at the "
+          "repo root so that 沃雅妮莎_by_原神_<download id>/沃雅妮莎.pmx exists, or set VODYANITSA_MODEL to the .pmx. "
+          "It is git-ignored and must never be committed (docs/adr/0002).")
+    check("Reference Motion", os.path.isfile(c["motion"]),
+          os.path.relpath(c["motion"], ROOT) if os.path.isfile(c["motion"]) else
+          "MISSING. Download the 時よ止まれ motion by Kei (@Kei_MMD_) and put 時よ止まれ.vmd at "
+          "assets/motion/toki-yo-tomare/時よ止まれ.vmd, or set VODYANITSA_MOTION to the .vmd. It is git-ignored.")
+    for k in ("review", "scratch"):
+        why = guard_reason(c[k])
+        check(f"{k} folder git-ignored", why is None, os.path.relpath(c[k], ROOT) if why is None else why)
+    bad = leaks()
+    check("git sees no model-derived file", not bad,
+          "clean" if not bad else f"{len(bad)} file(s): {', '.join(bad[:10])}; remove them from git before driving")
+    if a.run_id:
+        s, r = run_dirs(c, a.run_id)
+        bj = os.path.join(s, "build", "build.json")
+        if os.path.exists(bj):
+            b = load(bj, "build.json")
+            check("Build for this run", os.path.exists(b["blend"]),
+                  f"{b['kind']} Build, frames {b['frame_start']}..{b['frame_end']}, {b['vertices']} vertices")
+        else:
+            check("Build for this run", False, f"none yet; run: verify build --run-id {a.run_id}")
+        pidf = os.path.join(s, "blender.pid")
+        if os.path.exists(pidf):
+            check("no Blender job left running", False, f"pid file {os.path.relpath(pidf, ROOT)}; run verify cleanup")
+    failed = [n for n, ok, _ in checks if not ok]
+    print("DOCTOR " + ("OK" if not failed else "FAILED: " + ", ".join(failed)))
+    sys.exit(1 if failed else 0)
+
+
+# ---------------------------------------------------------------- launch (the only stand-in specific step)
+def launch_build(c, scratch):
+    """LAUNCH: make one Build into <scratch>/build/ and return the path of its build.json.
+
+    TODAY THIS IS THE STAND-IN BUILD (scripts/blender/standin_build.py). When the real Build exists,
+    replace the body of this function with a call to it; it must leave a build.json that meets the
+    contract in scripts/blender/common.py. Nothing else in this skill needs to change.
+    """
+    out = os.path.join(scratch, "build")
+    guard(out)
+    for k, what in (("model", "model"), ("motion", "Reference Motion")):
+        if not os.path.isfile(c[k]):
+            die(f"{what} not found at {c[k]}; run verify doctor for what to download and where to put it")
+    blender(c, scratch, "build", "standin_build.py", c["model"], c["motion"], out)
+    return os.path.join(out, "build.json")
+
+
+def cmd_build(a):
+    c = cfg()
+    s, r = run_dirs(c, a.run_id, create=True)
+    t = time.time()
+    bj = launch_build(c, s)
+    b = load(bj, "build.json")
+    pub = {k: v for k, v in b.items() if k != "blend"}
+    with open(guard(os.path.join(r, "build.json")), "w", encoding="utf-8") as f:
+        json.dump(pub, f, ensure_ascii=False, indent=1)
+    print(f"READY {b['kind']} Build for run {a.run_id}: frames {b['frame_start']}..{b['frame_end']} "
+          f"at {b['fps']} fps ({time.time() - t:.1f} s wall)")
+
+
+# ---------------------------------------------------------------- clip
+def note(b):
+    return "STAND-IN BUILD - not the real Build" if b["kind"] == "stand-in" else f"{b['kind']} Build"
+
+
+def cmd_clip(a):
+    c = cfg()
+    s, r = run_dirs(c, a.run_id, create=True)
+    bj = os.path.join(s, "build", "build.json")
+    b = load(bj, "Build (run verify build first)")
+    start = a.start if a.start is not None else b["frame_start"]
+    end = a.end if a.end is not None else b["frame_end"]
+    frames = os.path.join(guard(s), "frames")
+    shutil.rmtree(frames, ignore_errors=True)
+    timing = os.path.join(s, "clip_timing.json")
+    t = time.time()
+    blender(c, s, "clip", "clip.py", bj, frames, timing, str(a.frame_step), str(a.res_pct), str(start), str(end), note(b))
+    out = guard(os.path.join(r, "clip.mp4"))
+    fps = b["fps"] / a.frame_step
+    enc = subprocess.run([c["ffmpeg"], "-loglevel", "error", "-y", "-framerate", f"{fps:g}",
+                          "-i", os.path.join(frames, "f_%06d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                          "-crf", "20", "-movflags", "+faststart", out], capture_output=True, text=True)
+    if enc.returncode != 0:
+        die(f"ffmpeg failed: {enc.stderr.strip()}")
+    tm = load(timing, "clip timing")
+    probe = json.loads(subprocess.run([c["ffprobe"], "-v", "error", "-print_format", "json", "-show_format",
+                                       "-show_streams", out], capture_output=True, text=True).stdout)
+    st = probe["streams"][0]
+    info = {**tm, "clip": "clip.mp4", "build_kind": b["kind"], "playback_fps": fps,
+            "clip_time_of_frame": f"(frame - {b['frame_start']}) / {b['fps']} s",
+            "ffprobe": {"codec": st["codec_name"], "width": st["width"], "height": st["height"],
+                        "frames": int(st.get("nb_frames", 0)), "duration_s": float(probe["format"]["duration"])},
+            "wall_s": round(time.time() - t, 1)}
+    with open(guard(os.path.join(r, "clip.json")), "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=1)
+    print(f"CLIP READY {os.path.relpath(out, ROOT)}: {info['ffprobe']['frames']} frames, "
+          f"{info['ffprobe']['duration_s']:.1f} s, {st['width']}x{st['height']}, "
+          f"{tm['seconds_per_frame_mean']} s/frame render ({info['wall_s']} s wall)")
+
+
+# ---------------------------------------------------------------- scan
+def cmd_scan(a):
+    c = cfg()
+    s, r = run_dirs(c, a.run_id, create=True)
+    bj = os.path.join(s, "build", "build.json")
+    b = load(bj, "Build (run verify build first)")
+    conf = {"start": a.start if a.start is not None else b["frame_start"],
+            "end": a.end if a.end is not None else b["frame_end"],
+            "step": a.frame_step, "noise_mm": a.noise_mm, "min_depth_mm": a.min_depth_mm,
+            "min_duration_s": a.min_duration_s, "top": a.top, "still_res_pct": a.still_res_pct, "note": note(b)}
+    cj = os.path.join(guard(s), "scan_config.json")
+    with open(cj, "w") as f:
+        json.dump(conf, f)
+    shutil.rmtree(os.path.join(guard(r), "moments"), ignore_errors=True)
+    t = time.time()
+    blender(c, s, "scan", "scan.py", bj, r, cj)
+    print(f"SCAN READY {os.path.relpath(os.path.join(r, 'numbers.json'), ROOT)} ({time.time() - t:.1f} s wall)")
+    write_report(c, a.run_id)
+
+
+# ---------------------------------------------------------------- report
+def write_report(c, run_id):
+    s, r = run_dirs(c, run_id)
+    b = load(os.path.join(r, "build.json"), "build.json")
+    n = load(os.path.join(r, "numbers.json"), "numbers.json (run verify scan first)")
+    clip = load(os.path.join(r, "clip.json"), "clip.json (run verify clip first)") \
+        if os.path.exists(os.path.join(r, "clip.json")) else None
+    L = [f"# Vodyanitsa verification run {run_id}", ""]
+    if b["kind"] == "stand-in":
+        L += ["**STAND-IN BUILD, not the real Build.** The Reference Motion is played back on the imported model. "
+              "There is no Simulation Body, no trained controller, no toon look and no Secondary Physics, so hair, "
+              "skirt and ribbons are carried rigidly by their bones and pass through her body and the floor. "
+              "Those Overlaps are expected here and show that the scan sees faults; they say nothing about the real Build.", ""]
+    L += ["The 穿模 scan is a Measured Check that points at moments worth an Eye Check. It never declares a pass; "
+          "where an Eye Check disagrees with it, the Eye Check wins.", "", "## Stage 1 clip", ""]
+    if clip:
+        f = clip["ffprobe"]
+        L += [f"- `clip.mp4`: {f['width']}x{f['height']} {f['codec']}, {f['frames']} frames, {f['duration_s']:.1f} s, "
+              f"every {clip['frame_step']} frame(s) of Blender frames {clip['first_frame']}..{clip['last_frame']} "
+              f"played at {clip['playback_fps']:g} fps (real time), no audio.",
+              f"- Render cost: {clip['seconds_per_frame_mean']} s per frame at {clip['res_pct']}% of 1920x1080. "
+              f"Clip time of a Blender frame = {clip['clip_time_of_frame']}; the stamp in each frame shows the Blender frame."]
+    else:
+        L += ["- No clip in this run."]
+    t = n["timing"]
+    L += ["", "## Measured Check numbers", "",
+          f"- Frames scanned: {n['frames_scanned']} (every {n['frame_step']} frame(s), Blender frames "
+          f"{n['first_frame']}..{n['last_frame']}); {t['scan_s_per_frame']} s per frame.",
+          f"- Frames with any visible Overlap above {n['settings']['noise_mm']} mm: {n['frames_with_any_visible_overlap']}.",
+          f"- Events: {n['events_total']} found, {n['events_flagged']} flagged. Flagged by kind: "
+          + ", ".join(f"kind {k} ({n['measured_kinds'][k]}): {v}" for k, v in n["flagged_by_kind"].items()) + ".",
+          f"- Rule: {n['rule']}.", "",
+          "## Ten worst flagged moments", "",
+          "| # | time in clip | kind | part | through | deepest visible | lasted | still |",
+          "|---|---|---|---|---|---|---|---|"]
+    for e in n["worst"]:
+        L.append(f"| {e['rank']} | {e['peak_time_s']:.2f} s ({e['start_s']:.2f}-{e['end_s']:.2f}) | {e['kind']} | "
+                 f"{e['part']} | {e['other']} | {e['peak_visible_depth_mm']:.0f} mm | {e['duration_s']:.2f} s | "
+                 f"`{e.get('still', '-')}` |")
+    L += ["", "The magenta ring in each still marks where the deepest visible Overlap crosses the surface.", "",
+          f"## Beyond the ten ({len(n['beyond_top'])} more flagged, no stills)", ""]
+    for e in n["beyond_top"]:
+        L.append(f"- #{e['rank']} {e['peak_time_s']:.2f} s, kind {e['kind']}, {e['part']} through {e['other']}, "
+                 f"{e['peak_visible_depth_mm']:.0f} mm, {e['duration_s']:.2f} s")
+    L += ["", "## Not measured (coverage is partial)", ""] + [f"- {u}" for u in n["not_measured"]]
+    if b["kind"] == "stand-in":
+        L += ["", "## What this stand-in run does not prove", ""] + [f"- {x}" for x in STANDIN_GAPS]
+    L += ["", "## Credits", ""] + [f"- {x}" for x in CREDITS] + [
+        "", "These files are made from a model that forbids redistribution. Keep them out of git and do not publish them."]
+    out = guard(os.path.join(r, "report.md"))
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    print(f"REPORT READY {os.path.relpath(out, ROOT)}")
+
+
+STANDIN_GAPS = [
+    "the Simulation Body (none is built; the scan works on the Visible Mesh only)",
+    "a trained controller (the motion is keyframe playback, not a controller following it)",
+    "staying upright: playback cannot fall, so balance is never tested",
+    "drift from the Reference Motion: playback matches it by construction",
+    "the toon look: the clip uses the imported materials under a plain sun light",
+    "Secondary Physics for hair and dress: rigid bodies are deleted, so trailing parts follow their bones rigidly",
+    "Overlaps between collision shapes of a Simulation Body",
+    "foot contact: the motion was made for a taller model, so her feet can miss targets; that is not a fault of a Build",
+]
+
+
+def cmd_report(a):
+    write_report(cfg(), a.run_id)
+
+
+# ---------------------------------------------------------------- cleanup
+def cmd_cleanup(a):
+    c = cfg()
+    s, r = run_dirs(c, a.run_id)
+    pidf = os.path.join(s, "blender.pid")
+    if os.path.exists(pidf):
+        pid = int(open(pidf).read().split()[0])
+        cmdline = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+        if "Blender" in cmdline and BL in cmdline:
+            print(f"  stopping our Blender job pid {pid}")
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.5)
+                if subprocess.run(["ps", "-p", str(pid)], capture_output=True).returncode != 0:
+                    break
+            else:
+                os.kill(pid, signal.SIGKILL)
+        else:
+            print(f"  pid {pid} is not a Blender job of this skill any more; leaving it alone")
+    real_s, real_root = os.path.realpath(s), os.path.realpath(c["scratch"])
+    if os.path.commonpath([real_s, real_root]) != real_root or real_s == real_root:
+        die(f"refusing to remove {s}: not a run folder under the scratch root")
+    shutil.rmtree(s, ignore_errors=True)
+    try:
+        os.rmdir(c["scratch"])  # only if no other run is using it
+    except OSError:
+        pass
+    kept = sorted(os.listdir(r)) if os.path.isdir(r) else []
+    print(f"CLEANUP DONE removed {os.path.relpath(s, ROOT)}; evidence kept in {os.path.relpath(r, ROOT)}: {', '.join(kept) or 'nothing'}")
+
+
+def cmd_guard(a):
+    why = guard_reason(a.path)
+    print(f"GUARD {'ALLOWED' if why is None else 'REFUSED'} {a.path}" + (f": {why}" if why else ""))
+    sys.exit(0 if why is None else 3)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("doctor", help="read-only: is this machine and checkout worth driving?")
+    d.add_argument("--run-id")
+    for name, fn, h in (("build", cmd_build, "LAUNCH: make one Build (today: the stand-in)"),
+                        ("report", cmd_report, "rewrite report.md from the run's evidence"),
+                        ("cleanup", cmd_cleanup, "stop our Blender job, delete scratch, keep evidence")):
+        x = sub.add_parser(name, help=h)
+        x.add_argument("--run-id", required=True)
+        x.set_defaults(fn=fn)
+    cl = sub.add_parser("clip", help="render the stage 1 clip into review/verify/<run-id>/clip.mp4")
+    cl.add_argument("--run-id", required=True)
+    cl.add_argument("--frame-step", type=int, default=1, help="render every Nth frame (clip still plays in real time)")
+    cl.add_argument("--res-pct", type=int, default=100, help="percent of 1920x1080")
+    cl.add_argument("--start", type=int, help="first Blender frame (default: Build start)")
+    cl.add_argument("--end", type=int, help="last Blender frame (default: Build end)")
+    cl.set_defaults(fn=cmd_clip)
+    sc = sub.add_parser("scan", help="run the 穿模 scan; writes numbers.json, moments/*.png, report.md")
+    sc.add_argument("--run-id", required=True)
+    sc.add_argument("--frame-step", type=int, default=1)
+    sc.add_argument("--start", type=int)
+    sc.add_argument("--end", type=int)
+    sc.add_argument("--top", type=int, default=10)
+    sc.add_argument("--noise-mm", type=float, default=2.0, help="Overlap below this is ignored as measurement noise")
+    sc.add_argument("--min-depth-mm", type=float, default=10.0)
+    sc.add_argument("--min-duration-s", type=float, default=0.1)
+    sc.add_argument("--still-res-pct", type=int, default=100)
+    sc.set_defaults(fn=cmd_scan)
+    g = sub.add_parser("guard", help="say whether model-derived output may be written at PATH (exit 3 if refused)")
+    g.add_argument("path")
+    g.set_defaults(fn=cmd_guard)
+    d.set_defaults(fn=cmd_doctor)
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
