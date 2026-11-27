@@ -64,6 +64,20 @@ _Avoid_: Prompt, character sheet, personality model
 How closely the character's words and choices match her established lore, as scored against a rubric derived from that lore.
 _Avoid_: Accuracy, in-character score
 
+### Her voice and song
+
+**Voice**:
+The one synthetic voice she speaks in, and sings in wherever no official recording of her singing exists. It is designed for her from a written description, never copied from a real person's recordings, and is fixed by kept clips of that one voice, so that she sounds the same every time.
+_Avoid_: TTS, voicebank, clone, CV
+
+**Singing Performance**:
+She performs a whole song as its singer, standing in place, with the song carried by her singing, her mouth shapes and a singer's gestures. Her mouth following the song of a dance she is dancing is not a Singing Performance, and neither is a short piece from her Songbook.
+_Avoid_: Lip sync, karaoke, song number
+
+**Songbook**:
+The songs and short pieces prepared ahead of time that she can choose to sing in a Live Session. A song is given as a Singing Performance; a short piece, such as a warm-up scale or one hummed line, is sung in passing. She chooses from it; she does not invent a melody on the spot.
+_Avoid_: Playlist, setlist, repertoire
+
 ### Making and judging her
 
 **Build**:
@@ -71,7 +85,7 @@ Making her parts from the downloaded model: her Simulation Body, her look, her S
 _Avoid_: Script, pipeline run, export
 
 **Kept Result**:
-Something code cannot remake, which a Build never erases: a Controller, a Training Record, her memories of Live Sessions, and the downloaded originals she is built from.
+Something code cannot remake, which a Build never erases: a Controller, a Training Record, the clips that fix her Voice, her memories of Live Sessions, and the downloaded originals she is built from.
 _Avoid_: Artifact, checkpoint, output, save
 
 **Training Run**:
@@ -89,6 +103,10 @@ _Avoid_: Runtime, playback, demo
 **Eye Check**:
 A judgement the human makes by looking at a still or a clip; where it disagrees with a Measured Check, it wins.
 _Avoid_: Visual QA, sign-off, approval
+
+**Ear Check**:
+A judgement the human makes by listening to her speak or sing; where it disagrees with a Measured Check, it wins.
+_Avoid_: Listening test, audio QA, sign-off
 
 **Measured Check**:
 A judgement made from numbers, which can be repeated identically after every Build.
