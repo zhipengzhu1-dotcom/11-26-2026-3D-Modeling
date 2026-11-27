@@ -60,6 +60,8 @@ EOF
     printf '%s\0' render "$CLIPS" "$name" "$BUILD/frames/$ROUND/$name" "$lo" "$hi" "$RES" "$LOGS/timing_${name}_${lo}.json"
   done | LOGS_DIR="$LOGS" xargs -0 -n 8 -P 2 sh -c '
       B="$0"; PY="$1"; shift; log="$LOGS_DIR/clip_$3_$5.log"
+      # two Blenders starting in the same second race on Blender'"'"'s shared add-on library folder: stagger them
+      [ $(( ($5 / 120) % 2 )) -eq 1 ] && sleep 6
       "$B" -b --python "$PY" -- "$@" >"$log" 2>&1 || { echo "FAILED $3 $5"; tail -20 "$log"; }
       grep -E "CLIP DONE|Error" "$log" || true' "$B" "$D/clips.py" || true
   for name in $(echo "$JOBS" | awk '{print $1}' | uniq); do

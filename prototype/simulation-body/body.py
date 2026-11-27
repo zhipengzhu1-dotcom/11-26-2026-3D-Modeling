@@ -20,8 +20,8 @@ from scipy.spatial.transform import Rotation as Rot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-OUT = os.path.join(REPO, "build", "first-look")
-EX = os.path.join(OUT, "extract")
+OUT = os.environ.get("FIRSTLOOK_DIR", os.path.join(REPO, "build", "first-look"))  # where the body is written
+EX = os.path.join(REPO, "build", "first-look", "extract")
 
 PARTS = ["pelvis", "waist", "chest", "neck", "head", "collar_L", "collar_R", "upper_arm_L", "upper_arm_R",
          "forearm_L", "forearm_R", "hand_L", "hand_R", "thigh_L", "thigh_R", "shin_L", "shin_R", "foot_L", "foot_R"]
@@ -57,10 +57,21 @@ CORE = {"肌", "足", "颜", "颜2", "照れ", "鞋", "麦克风1", "麦克风2"
         "星目", "睫眉"}
 CORE_ON_TORSO = {"体"}   # the bodice: core on chest and waist, an ornament elsewhere (the band round her head)
 CLOSE = 0.012
+# Final round switches (env): HEAD_SKULL_ONLY=1 keeps only her skull and face on the head (no band or ornament
+# round her hair); SHOE_SIMPLE=1 covers the upper shoe with a handful of single shapes; ELBOW_PAST_DEG lets the
+# elbows bend that far past the straight limb (knees stay strict).
+HEAD_SKULL_ONLY = bool(os.environ.get("HEAD_SKULL_ONLY"))
+SHOE_SIMPLE = bool(os.environ.get("SHOE_SIMPLE"))
+ELBOW_PAST_DEG = float(os.environ.get("ELBOW_PAST_DEG", "0"))
 # The upper arm meets the chest at the armpit seam: with the arm hanging (walk, singing) her drawn surfaces sit
 # 0.5 mm apart there while the solids, which must stand a little off, go 22 mm into each other and hold the arm
 # out by about 13 degrees. These pairs are excluded from the start.
 SEAM_EXCLUDES = [("chest", "upper_arm_L"), ("chest", "upper_arm_R")]
+# Trims (epoch 1 on, TRIM=1): pairs whose solids jam although her drawn surfaces stay apart (head and chest: never
+# under 26 mm in any clip) or meet only as the motion crosses them (thighs, shins, feet): keep their solids at
+# least this share of her own rest-pose gap apart, by taking the facing sides in toward her drawn surface.
+TRIM = {("chest", "head"): 0.6, ("thigh_L", "thigh_R"): 0.8, ("shin_L", "shin_R"): 0.8, ("foot_L", "foot_R"): 0.8,
+        ("foot_L", "shin_R"): 0.8, ("foot_R", "shin_L"): 0.8} if os.environ.get("TRIM") else {}
 MARGIN_DEG, MARGIN_FRAC = 15.0, 0.20
 CLEAR = 0.0105    # lowest point of any foot solid that is not a floor-contact shape (m)
 PAD_TOP = 0.010   # top of the floor-contact boxes (m); their bottom is the floor, z = 0
@@ -382,7 +393,7 @@ def standoff_score(gs, axis, t0, t1, origin, ends):
     return (float(SURF.query(x)[0].mean()) if len(x) else 1.0) + 0.25 * over
 
 
-def fit_slab(P, axis, zmin=None, t0=None, t1=None, origin=None, ends=None, smooth=False):
+def fit_slab(P, axis, zmin=None, t0=None, t1=None, origin=None, ends=None, smooth=False, single=False):
     """Best of capsule / box / two side-by-side capsules / sphere, each the smallest that holds every point;
     the one whose surface stands off her surface least wins."""
     R0 = frame_from_z(axis)
@@ -401,6 +412,8 @@ def fit_slab(P, axis, zmin=None, t0=None, t1=None, origin=None, ends=None, smoot
     if len(P) > 20:
         cands.append([fit_capsule(P, R0[:, 0], zmin)])
         cands.append([fit_capsule(P, R0[:, 1], zmin)])
+    if single:  # one shape per slab
+        cands = [gs for gs in cands if len(gs) == 1]
     if smooth:  # capsules and spheres only
         cands = [gs for gs in cands if all(g["type"] != "box" for g in gs)]
     if SURF is None or t0 is None:
@@ -408,7 +421,7 @@ def fit_slab(P, axis, zmin=None, t0=None, t1=None, origin=None, ends=None, smoot
     return min(cands, key=lambda gs: standoff_score(gs, axis, t0, t1, origin, ends))
 
 
-def fit_part(P, axis, k, zmin=None, overlap=0.004, penalise_ends=True, smooth=False):
+def fit_part(P, axis, k, zmin=None, overlap=0.004, penalise_ends=True, smooth=False, single=False):
     t = (P - P.mean(0)) @ axis
     edges = np.linspace(t.min(), t.max(), k + 1)
     geoms = []
@@ -417,7 +430,7 @@ def fit_part(P, axis, k, zmin=None, overlap=0.004, penalise_ends=True, smooth=Fa
         if sel.sum() < 4:
             continue
         geoms += fit_slab(P[sel], axis, zmin, edges[i], edges[i + 1], P.mean(0),
-                          (edges[0], edges[-1]) if penalise_ends else None, smooth)
+                          (edges[0], edges[-1]) if penalise_ends else None, smooth, single)
     return geoms
 
 
@@ -449,10 +462,11 @@ def fit_foot(r, info, s, P):
     stil = ((rest - ank) @ f < -0.005) & (rest[:, 2] < zc)
     if stil.sum() > 8:
         sp = rest[stil]
-        geoms += fit_part(sp, unit(np.linalg.svd(sp - sp.mean(0))[2][0]), 3, zmin=CLEAR)
+        geoms += fit_part(sp, unit(np.linalg.svd(sp - sp.mean(0))[2][0]), 1 if SHOE_SIMPLE else 3, zmin=CLEAR,
+                          single=SHOE_SIMPLE)
     body = rest[~stil]
     ax = unit(np.linalg.svd(body - body.mean(0))[2][0])  # along the pitched shoe, heel cup to toe
-    geoms += fit_part(body, ax if ax @ f > 0 else -ax, 7, zmin=CLEAR)
+    geoms += fit_part(body, ax if ax @ f > 0 else -ax, 3 if SHOE_SIMPLE else 7, zmin=CLEAR, single=SHOE_SIMPLE)
     # nothing wider than the shoe: pull in any solid that sticks out past the shoe's sides
     side = R[:, 1]
     shoe = V[r[f"patch_shoe_{s}"]] @ side if s == "L" else (V[r["patch_shoe_R"]] * [-1, 1, 1]) @ side
@@ -615,8 +629,9 @@ def resolve_rest_overlaps(jp, joints, geoms, masses, parts_pts):
     trees = {p: cKDTree(parts_pts[p]) for p in PARTS}
     adj = {frozenset((p, PARENT[p])) for p in PARTS[1:]}
     mesh_gap, excludes, log, shrunk, hist = {}, [tuple(sorted(p)) for p in SEAM_EXCLUDES], [], {}, {}
+    trim_done = set()
     log += [f"exclude {a}-{b}: armpit seam (see SEAM_EXCLUDES)" for a, b in SEAM_EXCLUDES]
-    for it in range(200):
+    for it in range(600):
         spec = build_spec(jp, joints, geoms, masses, excludes)
         m = spec.compile()
         d = mujoco.MjData(m)
@@ -634,6 +649,9 @@ def resolve_rest_overlaps(jp, joints, geoms, masses, parts_pts):
                 if key not in mesh_gap:
                     mesh_gap[key] = float(trees[b1].query(parts_pts[b2])[0].min())
                 need = 0.002 if mesh_gap[key] >= 0.004 else 0.5 * mesh_gap[key]
+                tk = tuple(sorted((b1, b2)))
+                if tk in TRIM and tk not in trim_done:
+                    need = max(need, TRIM[tk] * mesh_gap[key])
                 ft = np.zeros(6)
                 dist = mujoco.mj_geomDistance(m, d, g1, g2, 0.05, ft)
                 if dist < need and (worst is None or need - dist > worst[0]):
@@ -645,6 +663,18 @@ def resolve_rest_overlaps(jp, joints, geoms, masses, parts_pts):
         k1 = int(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g1).split("_")[-1])
         k2 = int(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g2).split("_")[-1])
         s = deficit / 2 + 0.0002
+        tk = tuple(sorted((b1, b2)))
+        base_need = 0.002 if mesh_gap[key] >= 0.004 else 0.5 * mesh_gap[key]
+        trimming = tk in TRIM and tk not in trim_done and dist >= base_need - 1e-4
+        if tk in TRIM and not trimming:  # below the ordinary gap: shrink to that first, as without trims
+            s = (base_need - dist) / 2 + 0.0002
+        if trimming:
+            s = min(s, 0.0015)  # small steps, each checked against her surface
+            pk0 = [float(np.maximum(sd_geoms(parts_pts[b][::5], geoms[b]).min(1), 0).max()) for b in (b1, b2)]
+            if shrunk.get((b1, k1), 0) + s > 0.015 or shrunk.get((b2, k2), 0) + s > 0.015:
+                trim_done.add(tk)  # a trim never turns into an exclusion: stop trimming this pair
+                log.append(f"trim {b1}-{b2} stopped at the 15 mm limit (solids {1000 * dist:.1f} mm apart)")
+                continue
         if mesh_gap[key] < 0.001 or shrunk.get((b1, k1), 0) + s > 0.015 or shrunk.get((b2, k2), 0) + s > 0.015 \
                 or geoms[b1][k1].get("floor_contact") or geoms[b2][k2].get("floor_contact"):
             mir = tuple(sorted(mirror(x) for x in (b1, b2)))
@@ -679,6 +709,16 @@ def resolve_rest_overlaps(jp, joints, geoms, masses, parts_pts):
                 g["size"] = sz
                 g["pos"] = np.array(g["pos"]) - sign * np.sign(R[:, ax] @ n) * R[:, ax] * s / 2
             shrunk[(b, k)] = shrunk.get((b, k), 0) + s
+        if trimming:  # a trim never goes inside her drawn surface: undo the step if she would poke out 2 mm more
+            pk = [float(np.maximum(sd_geoms(parts_pts[b][::5], geoms[b]).min(1), 0).max()) for b in (b1, b2)]
+            if max(a - b for a, b in zip(pk, pk0)) > 0.002 or max(pk) > max(max(pk0), 0.002):
+                for (b, k, size, pos, ds) in hist[key][-2:]:
+                    geoms[b][k]["size"], geoms[b][k]["pos"] = size, pos
+                    shrunk[(b, k)] -= ds
+                del hist[key][-2:]
+                trim_done.add(tk)
+                log.append(f"trim {b1}-{b2} stopped where her surface would poke out (solids {1000 * dist:.1f} mm apart)")
+                continue
         log.append(f"shrink {b1}#{k1} and {b2}#{k2} by {1000 * s:.1f} mm (solids {1000 * dist:.1f} mm apart, "
                    f"keep {1000 * need:.1f}; her surfaces {1000 * mesh_gap[key]:.1f} mm)")
     return excludes, log, {"-".join(sorted(k)): v for k, v in mesh_gap.items()}, \
@@ -749,6 +789,8 @@ def select_surface(r, jp, S, lab, mat):
     near = np.zeros(len(S), bool)
     near[other] = tree.query(S[other], distance_upper_bound=CLOSE)[0] <= CLOSE
     keep = core | (other & near)
+    if HEAD_SKULL_ONLY:
+        keep &= core | (lab != PI["head"])
     stats = {}
     for nm in np.unique(names):
         sel = names == nm
@@ -833,6 +875,11 @@ def main():
     if frozen:
         old = json.load(open(frozen, encoding="utf-8"))
         joints, motions_info = old["joints"], old["motions"]
+        if ELBOW_PAST_DEG:
+            for s_ in "LR":
+                j = joints[f"forearm_{s_}"]
+                j["range_deg"][0][0] = j["straight_deg"] - ELBOW_PAST_DEG
+                j["elbow_past_straight_allowed_deg"] = ELBOW_PAST_DEG
     else:
         joints, motions_info = fit_joints(tdir, t0)
     print(f"axes and ranges done ({time.time() - t0:.0f}s){' (frozen from ' + frozen + ')' if frozen else ''}", flush=True)

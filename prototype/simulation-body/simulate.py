@@ -30,6 +30,22 @@ VARIANTS = {"soft": (2.5, 0.35), "stiff": (10.0, 1.0)}  # natural frequency (Hz)
 # (+-50-70 deg in the kick). These multiply the soft frequency and set the soft damping ratio per joint group.
 SOFT_GROUPS = {"forearm": (1.4, 0.35), "shin": (1.4, 0.35), "hand": (2.0, 0.5), "foot": (2.0, 0.5)}
 ROOT_HZ = 20.0                # the invisible hand
+# Tuning per figure (epochs override it with TUNING=<json>). These defaults are round 2 exactly.
+#   hz, zeta: natural frequency and damping ratio of her joint servos; groups: {joint group: [hz multiplier, zeta]}
+#   ff_vel: share of the reference velocity fed forward into the servo's damping term (1 = damp the error only)
+#   ff_id: share of the inverse-dynamics torque of the reference motion (inertia and Coriolis; gravity is already
+#          compensated) fed forward
+#   damping: {group: passive joint damping, N m s/rad}; armature: added rotor inertia per joint (kg m^2)
+#   contact_solref: [time constant, damping ratio] for every solid of hers (None = MuJoCo default 0.02, 1)
+#   torque_limit: N m cap on every joint servo of hers (absent or None = no cap)
+DEFAULT_TUNING = {
+    "stiff": {"hz": 10.0, "zeta": 1.0, "groups": {}, "ff_vel": 1.0, "ff_id": 0.0, "damping": {}, "armature": 0.0,
+              "contact_solref": None},
+    "soft": {"hz": 2.5, "zeta": 0.35, "groups": {k: list(v) for k, v in SOFT_GROUPS.items()}, "ff_vel": 1.0,
+             "ff_id": 0.0, "damping": {}, "armature": 0.0, "contact_solref": None},
+}
+TUNING = json.load(open(os.environ["TUNING"], encoding="utf-8")) if os.environ.get("TUNING") else DEFAULT_TUNING
+HI = 5                        # joint angles are also logged every HI physics steps (240 Hz) for the lag measure
 DANCE = "toki-yo-tomare/時よ止まれ.vmd"
 WALK = "2.歩き10L_乙女_(40f_前移動20).vmd"
 WALK_FALLBACK = "walk-fuyuneko-aruku/unpacked/歩く/歩く.vmd"
@@ -81,6 +97,14 @@ def body_dofs(m):
     return names, bj, rj
 
 
+def vr_full(v, m):
+    """A reference velocity or acceleration laid out by qpos address -> by dof address (all hinges/slides)."""
+    out = np.zeros(m.nv)
+    for j in range(m.njnt):
+        out[m.jnt_dofadr[j]] = v[m.jnt_qposadr[j]]
+    return out
+
+
 def mdiag(m, d):
     F = np.zeros((m.nv, m.nv))
     mujoco.mj_fullM(m, d, F)
@@ -101,8 +125,9 @@ def effective_inertia(m, qs):
     return {names[j]: float(v[m.jnt_dofadr[j]]) for j in range(m.njnt)}
 
 
-def add_servos(spec, m, hz, zeta, inertia):
+def add_servos(spec, m, tune, inertia):
     """Position actuators on every hinge of her body (and on the root joints when carried)."""
+    hz, zeta = tune["hz"], tune["zeta"]
     names, bj, rj = body_dofs(m)
     gains = {}
     d = mujoco.MjData(m)
@@ -112,14 +137,17 @@ def add_servos(spec, m, hz, zeta, inertia):
         I = inertia.get(names[j], Md[m.jnt_dofadr[j]]) if j in bj else Md[m.jnt_dofadr[j]]
         w, z = (2 * np.pi * ROOT_HZ, 1.0) if j in rj else (2 * np.pi * hz, zeta)
         grp = B.base(names[j].rsplit("_", 1)[0]) if j in bj else None
-        if j in bj and hz < 5 and grp in SOFT_GROUPS:
-            w, z = w * SOFT_GROUPS[grp][0], SOFT_GROUPS[grp][1]
+        if j in bj and grp in tune["groups"]:
+            w, z = w * tune["groups"][grp][0], tune["groups"][grp][1]
         kp, kv = I * w * w, 2 * z * I * w
         a = spec.add_actuator(name="act_" + names[j], target=names[j], trntype=mujoco.mjtTrn.mjTRN_JOINT)
         a.gaintype = mujoco.mjtGain.mjGAIN_FIXED
         a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
         a.gainprm[0] = kp
         a.biasprm[0], a.biasprm[1], a.biasprm[2] = 0, -kp, -kv
+        if j in bj and tune.get("torque_limit"):  # N m, servo force incl. gravity compensation
+            a.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+            a.forcerange = [-tune["torque_limit"], tune["torque_limit"]]
         gains[names[j]] = {"inertia": float(I), "kp": float(kp), "kv": float(kv)}
     return spec.compile(), gains
 
@@ -168,12 +196,37 @@ def fk(m, q):
 
 
 # ---------------------------------------------------------------- simulation
-def simulate(spec_base, mode, joints, q, hz, zeta, inertia):
+def simulate(spec_base, mode, joints, q, tune, inertia):
     spec = spec_base.copy()
+    for jt in spec.joints:
+        if not jt.name.startswith("root"):
+            grp = B.base(jt.name.rsplit("_", 1)[0])
+            jt.damping = [float(tune["damping"].get(grp, 0.0)), 0.0, 0.0]
+            jt.armature = jt.armature + float(tune["armature"])
+    if tune["contact_solref"]:
+        for g in spec.geoms:
+            if g.name != "floor":
+                g.solref = list(tune["contact_solref"])
     m0 = spec.compile()
-    m, gains = add_servos(spec, m0, hz, zeta, inertia)
+    m, gains = add_servos(spec, m0, tune, inertia)
     d = mujoco.MjData(m)
     names, bj, rj = body_dofs(m)
+    if tune["ff_id"]:  # inverse dynamics of the reference: no gravity (compensated), no contacts
+        sid = spec_base.copy()
+        sid.option.gravity = [0, 0, 0]
+        sid.option.disableflags = int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
+        mid = sid.compile()
+        did = mujoco.MjData(mid)
+    bv = np.array([m.jnt_dofadr[j] for j in bj])
+    bq = np.array([m.jnt_qposadr[j] for j in bj])
+    lo_r, hi_r = m.jnt_range[bj, 0], m.jnt_range[bj, 1]
+    q_hi, t_hi = [], []
+    pair_f = np.zeros(T := len(q))
+    depth = np.zeros(T)
+    held = np.zeros((T, len(bj)), bool)
+    tmax = np.zeros(T)
+    f6 = np.zeros(6)
+    pair_frames = {}
     T = len(q)
     t = np.arange(T) / FPS
     sp = CubicSpline(t, q, axis=0, bc_type="natural")
@@ -182,6 +235,7 @@ def simulate(spec_base, mode, joints, q, hz, zeta, inertia):
     act_q = np.array([m.jnt_qposadr[j] for j in act_j])
     act_v = np.array([m.jnt_dofadr[j] for j in act_j])
     ratio = np.array([m.actuator_biasprm[a, 2] / m.actuator_biasprm[a, 1] for a in range(m.nu)])  # kv/kp
+    ratio = ratio * np.array([1.0 if names[j].startswith("root") else tune["ff_vel"] for j in act_j])
     rq = np.array([m.jnt_qposadr[j] for j in rj], int)
     rv = np.array([m.jnt_dofadr[j] for j in rj], int)
     w = 2 * np.pi * ROOT_HZ
@@ -215,15 +269,30 @@ def simulate(spec_base, mode, joints, q, hz, zeta, inertia):
             d.ctrl[:] = qr[act_q] + ratio * vr[act_q]
             if mode == "carried":  # root servos above; here only the reference acceleration, fed forward
                 d.qfrc_applied[rv] = Mr * ddsp(tt)[rq]
+            if tune["ff_id"] and s % 4 == 0:
+                did.qpos[:], did.qvel[:], did.qacc[:] = qr, vr_full(vr, m), vr_full(ddsp(tt), m)
+                mujoco.mj_inverse(mid, did)
+                d.qfrc_applied[bv] = tune["ff_id"] * did.qfrc_inverse[bv]
             mujoco.mj_step(m, d)
             peak = np.maximum(peak, np.abs(d.qfrc_actuator))
+            tmax[f + 1] = max(tmax[f + 1], float(np.abs(d.qfrc_actuator[bv]).max()))
+            if s % HI == HI - 1:
+                q_hi.append(d.qpos[bq].copy())
+                t_hi.append((f * SUB + s + 1) / (FPS * SUB))
         if not np.all(np.isfinite(d.qpos)) or np.abs(d.qvel).max() > 1e3:
             ok = False
             print("  BLEW UP at frame", f)
             break
         nself = 0
-        for c in d.contact[:d.ncon]:
+        pf = {}
+        qb = d.qpos[bq]
+        held[f + 1] = (qb < lo_r + np.radians(0.5)) | (qb > hi_r - np.radians(0.5))
+        for ci, c in enumerate(d.contact[:d.ncon]):
             if m.geom_bodyid[c.geom1] != 0 and m.geom_bodyid[c.geom2] != 0:
+                mujoco.mj_contactForce(m, d, ci, f6)
+                key = (min(c.geom1, c.geom2), max(c.geom1, c.geom2))
+                pf[key] = pf.get(key, 0.0) + abs(f6[0])
+                depth[f + 1] = max(depth[f + 1], -float(c.dist))
                 nself += 1
                 cmask[f + 1, m.geom_bodyid[c.geom1] - 1] = cmask[f + 1, m.geom_bodyid[c.geom2] - 1] = True
             else:
@@ -231,12 +300,28 @@ def simulate(spec_base, mode, joints, q, hz, zeta, inertia):
                 cmask[f + 1, max(m.geom_bodyid[c.geom1], m.geom_bodyid[c.geom2]) - 1] = True
         max_self = max(max_self, nself)
         sum_self += nself
+        pair_f[f + 1] = max(pf.values()) if pf else 0.0
+        bp = {}
+        for (g1, g2), fv in pf.items():
+            k2 = "-".join(sorted((m.body(m.geom_bodyid[g1]).name, m.body(m.geom_bodyid[g2]).name)))
+            bp[k2] = max(bp.get(k2, 0.0), fv)
+        for k2, fv in bp.items():
+            if fv > 20:
+                pair_frames[k2] = pair_frames.get(k2, 0) + 1
     torque = {names[j]: float(peak[m.jnt_dofadr[j]]) for j in bj}
+    warn = int(sum(d.warning[i].number for i in range(len(d.warning))))
+    tq = np.arange(T) / FPS
+    diag = {"joint_names": np.array([names[j] for j in bj]), "range": m.jnt_range[bj], "q": qlog[:, bq],
+            "qref": q[:, bq], "q_hi": np.array(q_hi), "t_hi": np.array(t_hi),
+            "qref_hi": sp(np.array(t_hi))[:, bq] if t_hi else np.zeros((0, len(bj))),
+            "contact_mask": cmask, "self_pair_force_max": pair_f, "self_depth_max": depth, "held_at_limit": held,
+            "torque_max": tmax, "warnings": warn, "ok": ok, "t": tq,
+            "pairs_over_20N_frames": json.dumps(pair_frames)}
     gains = {k: v for k, v in gains.items() if not k.startswith("root")}
     return pos, rot, qlog, {"ok": ok, "gains": gains, "peak_torque_Nm": torque, "root_path_err_max_m": root_err,
                             "max_self_contacts_in_a_frame": max_self,
                             "mean_self_contacts_per_frame": sum_self / max(1, T - 1), "max_floor_penetration_m": max_floor_pen,
-                            "contact_mask": cmask}
+                            "contact_mask": cmask, "warnings": warn, "diag": diag}
 
 
 # ---------------------------------------------------------------- clips
@@ -337,7 +422,10 @@ def main():
     joints = binfo["joints"]
     motions = json.load(open(os.path.join(B.EX, "motions.json"), encoding="utf-8"))
     clips, info = clip_sources(motions, joints)
+    if os.environ.get("NO_PINNED"):  # final round: the five carried clips only
+        clips = [c for c in clips if c[5] != "pinned"]
     os.makedirs(os.path.join(OUT, "sim"), exist_ok=True)
+    os.makedirs(os.path.join(OUT, "sim_diag"), exist_ok=True)
     models = {mode: make_model(mode) for mode in ("carried", "pinned")}
     clips_json, per_clip = [], {}
     # effective inertia per joint along every clip's reference poses (one set of gains for her whole body)
@@ -381,8 +469,9 @@ def main():
                 lim_hits[names[j]] = n
         rec["ref_outside_range_frames"] = lim_hits
         qlogs = {}
-        for v, (hz, zeta) in VARIANTS.items():
-            pos, rot, qs, sinfo = simulate(spec, hips, joints, q, hz, zeta, inertia)
+        for v in ("soft", "stiff"):
+            pos, rot, qs, sinfo = simulate(spec, hips, joints, q, TUNING[v], inertia)
+            np.savez_compressed(os.path.join(OUT, "sim_diag", f"{name}_{v}.npz"), **sinfo.pop("diag"))
             out[f"pos_{v}"], out[f"rot_{v}"] = pos.astype(np.float32), rot.astype(np.float32)
             err_part = B.rot_angle(rot.reshape(-1, 3, 3), rot_ref.reshape(-1, 3, 3)).reshape(len(D), 19)
             jerr = np.degrees(np.abs(qs[:, [m.jnt_qposadr[j] for j in bj]] - q[:, [m.jnt_qposadr[j] for j in bj]]))
@@ -405,7 +494,8 @@ def main():
     with open(os.path.join(OUT, "clips.json"), "w", encoding="utf-8") as f:
         json.dump(clips_json, f, ensure_ascii=False, indent=1)
     with open(os.path.join(OUT, "sim_info.json"), "w", encoding="utf-8") as f:
-        json.dump({"clips": per_clip, **info, "variants": VARIANTS, "soft_groups": SOFT_GROUPS, "root_hz": ROOT_HZ, "effective_inertia": inertia,
+        json.dump({"clips": per_clip, **info, "variants": {v: (TUNING[v]["hz"], TUNING[v]["zeta"]) for v in ("soft", "stiff")},
+                   "soft_groups": TUNING["soft"]["groups"], "tuning": TUNING, "root_hz": ROOT_HZ, "effective_inertia": inertia,
                    "timestep_s": 1 / (FPS * SUB)}, f, ensure_ascii=False, indent=1)
     print(f"simulate done ({time.time() - t0:.0f}s)")
 

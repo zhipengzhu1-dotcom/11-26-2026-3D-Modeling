@@ -11,7 +11,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-OUT = os.path.join(REPO, "build", "first-look")
+OUT = os.environ.get("FIRSTLOOK_DIR", os.path.join(REPO, "build", "first-look"))
 PARTS = ["pelvis", "waist", "chest", "neck", "head", "collar_L", "collar_R", "upper_arm_L", "upper_arm_R",
          "forearm_L", "forearm_R", "hand_L", "hand_R", "thigh_L", "thigh_R", "shin_L", "shin_R", "foot_L", "foot_R"]
 
@@ -21,6 +21,41 @@ def axis_words(v):
     k = max(range(3), key=lambda i: abs(v[i]))
     word = names[k][0] if v[k] > 0 else names[k][1]
     return f"{word} ({v[0]:+.2f}, {v[1]:+.2f}, {v[2]:+.2f})" if abs(v[k]) < 0.95 else word
+
+
+def glance(w, dst, bi):
+    """Per clip and figure, from this round's scorecard and simulation logs (when a scorecard exists)."""
+    sc = os.path.join(dst, "scorecard.json")
+    if not os.path.exists(sc):
+        return
+    card = json.load(open(sc))
+    w("## At a glance, per clip and figure\n")
+    w("Overshoot: median share of the swing the figure goes past the motion's turning points while nothing "
+      "touches. Lag: how far the figure trails the motion. Head: 95th-percentile head rotation error. Part error: "
+      "mean rotation error over all 19 parts. Elbow past straight: share of frames in which either elbow is bent "
+      "past the straight limb, and the most, for the figure and (in brackets) for the Reference Motion. "
+      f"Elbows may now go {bi['joints']['forearm_L'].get('elbow_past_straight_allowed_deg', 0):.0f} deg past straight; "
+      "knees not at all.\n")
+    w("| Clip | Figure | Overshoot | Lag | Head (95%) | Part error | Elbow past straight |\n|---|---|---|---|---|---|---|")
+    for clip in card["figures"]["stiff"]["per_clip"]:
+        for fig in ("stiff", "soft"):
+            m = card["figures"][fig]["per_clip"][clip]["measured"]
+            dg = np.load(os.path.join(OUT, "sim_diag", f"{clip}_{fig}.npz"))
+            names = [str(n) for n in dg["joint_names"]]
+            past_f, past_r = [], []
+            for sd in "LR":
+                j = names.index(f"forearm_{sd}_flex")
+                st = bi["joints"][f"forearm_{sd}"]["straight_deg"]
+                past_f.append(st - np.degrees(dg["q"][:, j]))
+                past_r.append(st - np.degrees(dg["qref"][:, j]))
+            pf, pr = np.max(past_f, 0), np.max(past_r, 0)
+            ov = "n/a" if m["6b_overshoot_pct"] is None else f"{m['6b_overshoot_pct']:.1f}%"
+            lag = "n/a" if m["6a_lag_ms"] is None else f"{m['6a_lag_ms']:.0f} ms"
+            w(f"| {clip} | {fig} | {ov} | {lag} | {m['2a_head_p95_deg']:.1f} | {m['1a_part_rotation_deg']:.1f} | "
+              f"{100 * (pf > 0).mean():.0f}%, up to {max(pf.max(), 0):.1f} ({100 * (pr > 0).mean():.0f}%, up to "
+              f"{max(pr.max(), 0):.1f}) |")
+    w(f"\nScores (fixed scorecard, out of 100): stiff {card['figures']['stiff']['total']:.1f}, "
+      f"soft {card['figures']['soft']['total']:.1f}; every line in `scorecard.md`.\n")
 
 
 GROUPS = {"head": ["head"], "upper arms": ["upper_arm_L", "upper_arm_R"], "hands": ["hand_L", "hand_R"]}
@@ -40,7 +75,7 @@ def part_errors(npz_dir, clip):
 def before_after(w, rnd, bi, si, numbers):
     """Round 1 against this round, read from round 1's own files (never hard-coded)."""
     r1n = os.path.join(REPO, "review", "first-look", "round1", "numbers.json")
-    snap = os.path.join(OUT, "round1_snapshot")
+    snap = os.path.join(REPO, "build", "first-look", "round1_snapshot")
     if rnd == "round1" or not (os.path.exists(r1n) and os.path.exists(os.path.join(snap, "sim_info.json"))):
         return
     n1 = json.load(open(r1n, encoding="utf-8"))
@@ -133,6 +168,7 @@ def main():
     L = []
     w = L.append
     w(f"# Her Simulation Body, first look ({rnd}): the numbers\n")
+    glance(w, dst, bi)
     w("Directions are hers: left, right, front, back, up. Angles in degrees, lengths in millimetres unless "
       "marked. Everything here is measured by code on the local model; nothing is hand-set except the "
       "choices listed under *Choices the contract left open*.\n")
