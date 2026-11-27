@@ -85,4 +85,18 @@ Weight shares of 25.5 kg: head 16.8, neck 1.4, chest 12.8, collar 0.4 each, wais
 
 ## Run
 
-`./prototype/simulation-body/run.sh round1` runs every step and leaves `review/first-look/round1/index.html`.
+- Round 1 or 2 as first built: `./prototype/simulation-body/run.sh <round>` (the body half, then the picture half).
+- The final round: `./prototype/simulation-body/run_final.sh`, then `BODY=build/first-look/epochs/final/body.json CLIPS=build/first-look/epochs/final/clips.json ./prototype/simulation-body/run_picture.sh final`. It leaves `review/first-look/final/index.html`.
+- The scored rounds: `epoch.sh`, `score.py`, `scoreboard.py`. The narrated status video: `uv run --with pillow python prototype/simulation-body/present.py`.
+- Clips render in her settled look (`toon_look.py`, `look_params.json`) unless `LOOK=plain`.
+
+## What happened, and the verdict
+
+The human confirmed the final round on 27 November 2026; the record is the resolution comment on issue 20.
+
+- **Round 1** gave a solid to everything bound to a body bone, which wrapped her hair, skirt and sleeves. The bulk shoved her off the motion. The brief was wrong, not the idea: loose parts get no solid (`docs/adr/0004`).
+- **Round 2** gave solids only to her body and close-fitting pieces. The stiff figure followed well; with soft joints her head folded forward.
+- **Five scored rounds** (`score.py`, each figure out of 100 as a humanoid) raised stiff from 82.1 to 87.6 and soft from 62.6 to 79.2, but soft got there by becoming exact and lost its spring: the scorecard weighted following over springing.
+- **The final round** is what was confirmed: 19 parts with joints at her bones, 107 solids on her body and close-fitting pieces only, a head without hair, shoe contact at the front pad and heel tip, elbows up to 15 degrees past straight, a firm spine, neck and ankles with soft arms and legs, and hips carried while she is judged.
+
+Departures from the contract above: the walk clip uses フユネコ's `歩く.vmd` (the むつごろう loop's ends do not join), and the final round drops `dance_pinned`.
